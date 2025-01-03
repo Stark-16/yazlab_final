@@ -1,0 +1,1766 @@
+Albert 
+# Gerekli kütüphaneleri yükleme
+import pandas as pd
+import torch
+import time
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader, Dataset
+from transformers import AlbertTokenizer, AlbertForSequenceClassification
+from transformers import AdamW
+from torch.nn import CrossEntropyLoss
+
+# Cihaz kontrolü (GPU varsa kullan)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 1. Veri Yükleme
+train_df = pd.read_csv("/content/drive/MyDrive/datalar/train_data.csv")
+test_df = pd.read_csv("/content/drive/MyDrive/datalar/test_data.csv")
+# 2. Veri Ön İşleme
+label_encoder = LabelEncoder()
+train_df['Category'] = label_encoder.fit_transform(train_df['Category'])
+test_df['Category'] = label_encoder.transform(test_df['Category'])
+
+# 3. Tokenizer Tanımlama
+tokenizer = AlbertTokenizer.from_pretrained("albert-base-v2")
+
+# 4. Dataset Sınıfı Tanımlama
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+
+        encoding = self.tokenizer.encode_plus(
+            text,
+            max_length=self.max_len,
+            add_special_tokens=True,
+            truncation=True,
+            padding='max_length',
+            return_tensors="pt"
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'label': torch.tensor(label, dtype=torch.long)
+        }
+
+# 5. Dataset ve DataLoader Hazırlama
+MAX_LEN = 64
+BATCH_SIZE = 16
+
+train_dataset = TextDataset(
+    train_df['Content'].values,
+    train_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+test_dataset = TextDataset(
+    test_df['Content'].values,
+    test_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+# 6. Model Tanımlama
+model = AlbertForSequenceClassification.from_pretrained("albert-base-v2", num_labels=len(train_df['Category'].unique()))
+model.to(device)
+
+# 7. Optimizasyon ve Loss Fonksiyonu
+optimizer = AdamW(model.parameters(), lr=2e-5)
+criterion = CrossEntropyLoss()
+
+# 8. Eğitim ve Doğrulama Döngüsü
+EPOCHS = 5
+
+def train_model():
+    model.train()
+    total_loss = 0
+
+    for batch_idx, batch in enumerate(train_loader):
+        optimizer.zero_grad()
+
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['label'].to(device)
+
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        # Her batch sonrası ilerlemeyi yazdır
+        #if (batch_idx + 1) % 10 == 0:
+         #   print(f"Batch {batch_idx + 1}/{len(train_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(train_loader)
+
+def validate_model():
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(val_loader):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+
+            total_loss += loss.item()
+
+            # Her batch sonrası ilerlemeyi yazdır
+            #if (batch_idx + 1) % 10 == 0:
+             #   print(f"Validation Batch {batch_idx + 1}/{len(val_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(val_loader)
+
+# Eğitim ve Doğrulama Zamanını Hesaplama
+start_time = time.time()
+
+for epoch in range(EPOCHS):
+    print(f"Epoch {epoch + 1}/{EPOCHS}")
+    train_loss = train_model()
+    val_loss = validate_model()
+    print(f"Epoch {epoch + 1}/{EPOCHS}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
+end_time = time.time()
+training_time = end_time - start_time
+
+print(f"Training Time: {training_time:.2f} seconds")
+
+model.save_pretrained("/content/drive/MyDrive/datalar/saved_albert_model")
+tokenizer.save_pretrained("/content/drive/MyDrive/datalar/saved_albert_model")
+
+
+# Model ve Tokenizer'ı Kaydetme
+model_save_path = "/content/drive/MyDrive/datalar/albert_model"
+tokenizer_save_path = "/content/drive/MyDrive/datalar/albert_tokenizer"
+
+# Modeli kaydet
+model.save_pretrained(model_save_path)
+
+# Tokenizer'ı kaydet
+tokenizer.save_pretrained(tokenizer_save_path)
+
+print("Model ve Tokenizer başarıyla kaydedildi.")
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_curve, auc
+import seaborn as sns
+import time
+import torch
+
+# Eğitim ve doğrulama kayıplarını sabitleme
+training_losses = [0.4553, 0.2590, 0.1954, 0.1528, 0.1209]
+validation_losses = [0.2819, 0.2515, 0.2412, 0.2630, 0.2220]
+
+# Başarım metriklerini hesaplamak
+def calculate_metrics(model, val_loader):
+    model.eval()
+
+    all_labels = []
+    all_preds = []
+    all_probs = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            # Modelin çıkışı
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+
+            # Tahmin ve gerçek etiketleri sakla
+            _, preds = torch.max(logits, dim=-1)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+
+    # Hesaplanan metrikler
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    # Sensitivity (Recall) and Specificity
+    cm = confusion_matrix(all_labels, all_preds)
+    sensitivity = cm[1, 1] / (cm[1, 0] + cm[1, 1]) if cm[1, 0] + cm[1, 1] != 0 else 0
+    specificity = cm[0, 0] / (cm[0, 0] + cm[0, 1]) if cm[0, 0] + cm[0, 1] != 0 else 0
+
+    # AUC
+    fpr, tpr, thresholds = roc_curve(all_labels, np.array(all_probs)[:, 1], pos_label=1)
+    auc_score = auc(fpr, tpr)
+
+    return accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr
+
+# Modelin başarım metriklerini hesaplama
+accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr = calculate_metrics(model, val_loader)
+
+# Sonuçları yazdırma
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+print(f"Sensitivity: {sensitivity:.4f}")
+print(f"Specificity: {specificity:.4f}")
+print(f"AUC: {auc_score:.4f}")
+
+# Karmaşıklık Matrisi
+def plot_confusion_matrix(cm, labels):
+    plt.figure(figsize=(6, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
+    plt.title("Confusion Matrix")
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.show()
+
+# Karmaşıklık matrisini çizme
+labels = label_encoder.classes_  # Kategorileri al
+plot_confusion_matrix(cm, labels)
+
+# ROC Eğrisini Çizme
+def plot_roc_curve(fpr, tpr, auc_score):
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='blue', label=f'ROC curve (AUC = {auc_score:.4f})')
+    plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+    plt.title("Receiver Operating Characteristic (ROC) Curve")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend(loc="lower right")
+    plt.show()
+
+# ROC Eğrisini çizme
+plot_roc_curve(fpr, tpr, auc_score)
+
+# Epoch ve Loss Grafiği
+def plot_loss_graph(training_losses, validation_losses):
+    plt.figure(figsize=(8, 6))
+    plt.plot(training_losses, label="Training Loss")
+    plt.plot(validation_losses, label="Validation Loss")
+    plt.title("Epoch vs Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+# Eğitim ve doğrulama kayıplarını çizme
+plot_loss_graph(training_losses, validation_losses)
+
+# İnferans Süresi (Inference Time)
+def measure_inference_time(model, text, tokenizer):
+    start_time = time.time()
+    model.eval()
+
+    encoding = tokenizer.encode_plus(
+        text,
+        max_length=64,
+        add_special_tokens=True,
+        truncation=True,
+        padding='max_length',
+        return_tensors="pt"
+    )
+
+    input_ids = encoding['input_ids'].to(device)
+    attention_mask = encoding['attention_mask'].to(device)
+
+    with torch.no_grad():
+        model(input_ids, attention_mask=attention_mask)
+
+    end_time = time.time()
+    inference_time = end_time - start_time
+    return inference_time
+
+# Örnek bir metin üzerinde inferans süresi ölçme
+text_example = "This is a test text for inference time."
+inference_time = measure_inference_time(model, text_example, tokenizer)
+print(f"Inference Time: {inference_time:.4f} seconds")
+
+# Eğitim zamanı
+training_time = 4047.29  # Saniye cinsinden
+print(f"Training Time: {training_time:.2f} seconds")
+
+
+GPT 
+
+import pandas as pd
+import torch
+from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader, Dataset
+from transformers import GPT2Tokenizer, GPT2Model, GPT2Config, GPT2ForSequenceClassification
+from transformers import AdamW
+from torch.nn import CrossEntropyLoss
+
+# Cihaz kontrolü (GPU varsa kullan)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 1. Veri Yükleme
+train_df = pd.read_csv("/content/train_data.csv")
+test_df = pd.read_csv("/content/test_data.csv")
+
+# 2. Veri Ön İşleme
+label_encoder = LabelEncoder()
+train_df['Category'] = label_encoder.fit_transform(train_df['Category'])
+test_df['Category'] = label_encoder.transform(test_df['Category'])
+
+# 3. Tokenizer Tanımlama
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+tokenizer.pad_token = tokenizer.eos_token  # GPT-2 pad token tanımlaması
+
+# 4. Dataset Sınıfı Tanımlama
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+
+        encoding = self.tokenizer.encode_plus(
+            text,
+            max_length=self.max_len,
+            add_special_tokens=True,
+            truncation=True,
+            padding='max_length',
+            return_tensors="pt"
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'label': torch.tensor(label, dtype=torch.long)
+        }
+
+# 5. Dataset ve DataLoader Hazırlama
+MAX_LEN = 64
+BATCH_SIZE = 16
+
+train_dataset = TextDataset(
+    train_df['Content'].values,
+    train_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+test_dataset = TextDataset(
+    test_df['Content'].values,
+    test_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+# 6. Model Tanımlama
+model = GPT2ForSequenceClassification.from_pretrained("gpt2", num_labels=len(train_df['Category'].unique()))
+model.config.pad_token_id = model.config.eos_token_id  # Pad token ayarı
+model.to(device)
+
+# 7. Optimizasyon ve Loss Fonksiyonu
+optimizer = AdamW(model.parameters(), lr=2e-5)
+criterion = CrossEntropyLoss()
+
+# 8. Eğitim ve Doğrulama Fonksiyonları
+def train_model():
+    model.train()
+    total_loss = 0
+
+    for batch in train_loader:
+        optimizer.zero_grad()
+
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['label'].to(device)
+
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(train_loader)
+
+def validate_model():
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+
+            total_loss += loss.item()
+
+    return total_loss / len(val_loader)
+
+import time  # Eğitim süresini ölçmek için gerekli
+
+# 9. Eğitim Döngüsü
+EPOCHS = 5
+total_training_time = 0  # Toplam eğitim süresini ölçmek için
+
+for epoch in range(EPOCHS):
+    print(f"Epoch {epoch + 1}/{EPOCHS}")
+
+    # Epoch başında zaman damgasını al
+    start_time = time.time()
+
+    train_loss = train_model()
+    val_loss = validate_model()
+
+    # Epoch sonunda geçen süreyi hesapla
+    end_time = time.time()
+    epoch_time = end_time - start_time
+    total_training_time += epoch_time
+
+    print(f"Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+    print(f"Epoch {epoch + 1} Training Time: {epoch_time:.2f} seconds\n")
+
+# Toplam eğitim süresini yazdır
+print(f"Total Training Time: {total_training_time:.2f} seconds")
+
+
+
+from transformers import GPT2Tokenizer, GPT2ForSequenceClassification
+
+# Model ve tokenizer'ı yükleme
+model = GPT2ForSequenceClassification.from_pretrained("/content/saved_gpt_model")
+tokenizer = GPT2Tokenizer.from_pretrained("/content/saved_gpt_model")
+
+# Cihaz ayarı (GPU varsa)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Model hazır!
+print("Eğitilmiş model başarıyla yüklendi.")
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_curve, auc
+import seaborn as sns
+import time
+import torch
+
+# Eğitim ve doğrulama kayıplarını sabitleme
+training_losses = [0.5731, 0.2581, 0.1869, 0.1371, 0.1050]
+validation_losses = [0.3159, 0.2221, 0.2154, 0.2258, 0.2143]
+
+# Başarım metriklerini hesaplamak
+def calculate_metrics(model, val_loader):
+    model.eval()
+
+    all_labels = []
+    all_preds = []
+    all_probs = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            # Modelin çıkışı
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+
+            # Tahmin ve gerçek etiketleri sakla
+            _, preds = torch.max(logits, dim=-1)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+
+    # Hesaplanan metrikler
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    # Sensitivity (Recall) and Specificity
+    cm = confusion_matrix(all_labels, all_preds)
+    sensitivity = cm[1, 1] / (cm[1, 0] + cm[1, 1])
+    specificity = cm[0, 0] / (cm[0, 0] + cm[0, 1])
+
+    # AUC
+    fpr, tpr, thresholds = roc_curve(all_labels, np.array(all_probs)[:, 1], pos_label=1)
+    auc_score = auc(fpr, tpr)
+
+    return accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr
+
+# Modelin başarım metriklerini hesaplama
+accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr = calculate_metrics(model, val_loader)
+
+# Sonuçları yazdırma
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+print(f"Sensitivity: {sensitivity:.4f}")
+print(f"Specificity: {specificity:.4f}")
+print(f"AUC: {auc_score:.4f}")
+
+# Karmaşıklık Matrisi
+def plot_confusion_matrix(cm, labels):
+    plt.figure(figsize=(6, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
+    plt.title("Confusion Matrix")
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.show()
+
+# Karmaşıklık matrisini çizme
+labels = label_encoder.classes_  # Kategorileri al
+plot_confusion_matrix(cm, labels)
+
+# ROC Eğrisini Çizme
+def plot_roc_curve(fpr, tpr, auc_score):
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='blue', label=f'ROC curve (AUC = {auc_score:.4f})')
+    plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+    plt.title("Receiver Operating Characteristic (ROC) Curve")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend(loc="lower right")
+    plt.show()
+
+# ROC Eğrisini çizme
+plot_roc_curve(fpr, tpr, auc_score)
+
+# Epoch ve Loss Grafiği
+def plot_loss_graph(training_losses, validation_losses):
+    plt.figure(figsize=(8, 6))
+    plt.plot(training_losses, label="Training Loss")
+    plt.plot(validation_losses, label="Validation Loss")
+    plt.title("Epoch vs Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+# Eğitim ve doğrulama kayıplarını çizme
+plot_loss_graph(training_losses, validation_losses)
+
+# İnferans Süresi (Inference Time)
+def measure_inference_time(model, text, tokenizer):
+    start_time = time.time()
+    model.eval()
+
+    encoding = tokenizer.encode_plus(
+        text,
+        max_length=64,
+        add_special_tokens=True,
+        truncation=True,
+        padding='max_length',
+        return_tensors="pt"
+    )
+
+    input_ids = encoding['input_ids'].to(device)
+    attention_mask = encoding['attention_mask'].to(device)
+
+    with torch.no_grad():
+        model(input_ids, attention_mask=attention_mask)
+
+    end_time = time.time()
+    inference_time = end_time - start_time
+    return inference_time
+
+# Örnek bir metin üzerinde inferans süresi ölçme
+text_example = "This is a test text for inference time."
+inference_time = measure_inference_time(model, text_example, tokenizer)
+print(f"Inference Time: {inference_time:.4f} seconds")
+
+
+BERT 
+
+# Gerekli kütüphaneleri yükleme
+import pandas as pd
+import torch
+import time
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader, Dataset
+from transformers import BertTokenizer, BertForSequenceClassification
+from transformers import AdamW
+from torch.nn import CrossEntropyLoss
+
+# Cihaz kontrolü (GPU varsa kullan)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 1. Veri Yükleme
+train_df = pd.read_csv("/content/drive/MyDrive/datas/train_data.csv")
+test_df = pd.read_csv("/content/drive/MyDrive/datas/test_data.csv")
+
+# 2. Veri Ön İşleme
+label_encoder = LabelEncoder()
+train_df['Category'] = label_encoder.fit_transform(train_df['Category'])
+test_df['Category'] = label_encoder.transform(test_df['Category'])
+
+# 3. Tokenizer Tanımlama
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+# 4. Dataset Sınıfı Tanımlama
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+
+        encoding = self.tokenizer.encode_plus(
+            text,
+            max_length=self.max_len,
+            add_special_tokens=True,
+            truncation=True,
+            padding='max_length',
+            return_tensors="pt"
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'label': torch.tensor(label, dtype=torch.long)
+        }
+
+# 5. Dataset ve DataLoader Hazırlama
+MAX_LEN = 64
+BATCH_SIZE = 16
+
+train_dataset = TextDataset(
+    train_df['Content'].values,
+    train_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+test_dataset = TextDataset(
+    test_df['Content'].values,
+    test_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+# 6. Model Tanımlama
+model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=len(train_df['Category'].unique()))
+model.to(device)
+
+# 7. Optimizasyon ve Loss Fonksiyonu
+optimizer = AdamW(model.parameters(), lr=2e-5)
+criterion = CrossEntropyLoss()
+
+
+import time
+# 8. Eğitim ve Doğrulama Döngüsü
+EPOCHS = 5
+
+def train_model():
+    model.train()
+    total_loss = 0
+
+    for batch_idx, batch in enumerate(train_loader):
+        optimizer.zero_grad()
+
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['label'].to(device)
+
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        # Her batch sonrası ilerlemeyi yazdır
+        #if (batch_idx + 1) % 10 == 0:
+            #print(f"Batch {batch_idx + 1}/{len(train_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(train_loader)
+
+def validate_model():
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(val_loader):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+
+            total_loss += loss.item()
+
+            # Her batch sonrası ilerlemeyi yazdır
+            #if (batch_idx + 1) % 10 == 0:
+                #print(f"Validation Batch {batch_idx + 1}/{len(val_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(val_loader)
+
+# Eğitim ve Doğrulama Zamanını Hesaplama
+start_time = time.time()
+
+for epoch in range(EPOCHS):
+    print(f"Epoch {epoch + 1}/{EPOCHS}")
+    train_loss = train_model()
+    val_loss = validate_model()
+    print(f"Epoch {epoch + 1}/{EPOCHS}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
+end_time = time.time()
+training_time = end_time - start_time
+
+print(f"Training Time: {training_time:.2f} seconds")
+
+# Modeli ve Tokenizer'ı Kaydetme
+output_dir = "/content/drive/MyDrive/datas/bert_model"  # Modeli kaydetmek istediğiniz dizin
+model.save_pretrained(output_dir)
+tokenizer.save_pretrained(output_dir)
+
+print(f"Model ve tokenizer {output_dir} dizinine başarıyla kaydedildi!")
+
+import numpy as np
+import pandas as pd
+import torch
+import time
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    roc_auc_score,
+    roc_curve
+)
+import matplotlib.pyplot as plt
+import seaborn as sns
+from torch.utils.data import DataLoader, Dataset
+from transformers import BertTokenizer, BertForSequenceClassification
+from sklearn.preprocessing import LabelEncoder  # LabelEncoder'ı ekliyoruz
+
+# Test verisi yükleme
+test_df = pd.read_csv("/content/drive/MyDrive/datas/test_data.csv")
+
+# LabelEncoder ile etiketleri sayısal hale getiriyoruz
+label_encoder = LabelEncoder()
+test_df['Category'] = label_encoder.fit_transform(test_df['Category'])
+
+# Tokenizer ve Model Yükleme
+output_dir = "/content/drive/MyDrive/datas/bert_model"
+tokenizer = BertTokenizer.from_pretrained(output_dir)
+model = BertForSequenceClassification.from_pretrained(output_dir)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Veri Ön İşleme ve Dataset Hazırlığı
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+
+        encoding = self.tokenizer.encode_plus(
+            text,
+            max_length=self.max_len,
+            add_special_tokens=True,
+            truncation=True,
+            padding='max_length',
+            return_tensors="pt"
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'label': torch.tensor(label, dtype=torch.long)  # Etiket sayısal olacak
+        }
+
+MAX_LEN = 64
+BATCH_SIZE = 16
+
+test_dataset = TextDataset(
+    test_df['Content'].values,
+    test_df['Category'].values,  # Sayısal etiketler
+    tokenizer,
+    MAX_LEN
+)
+
+val_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+# Başarım Metriklerini Hesaplama
+def evaluate_model():
+    model.eval()
+    all_preds = []
+    all_labels = []
+    all_probs = []  # Olasılıkları saklamak için
+
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            probs = torch.nn.functional.softmax(logits, dim=-1)  # Softmax ile olasılıkları al
+            preds = torch.argmax(probs, dim=1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())  # Olasılıkları sakla
+
+    return np.array(all_preds), np.array(all_labels), np.array(all_probs)
+
+# Tahmin, Gerçek Değerler ve Olasılıklar
+predictions, true_labels, probs = evaluate_model()
+
+# Metrikleri Hesapla
+accuracy = accuracy_score(true_labels, predictions)
+precision = precision_score(true_labels, predictions, average='weighted')
+recall = recall_score(true_labels, predictions, average='weighted')
+f1 = f1_score(true_labels, predictions, average='weighted')
+
+# Confusion Matrix
+conf_matrix = confusion_matrix(true_labels, predictions)
+
+# ROC AUC Hesaplama (multi-class için weighted average)
+roc_auc = roc_auc_score(true_labels, probs, multi_class="ovr", average="weighted")
+
+# ROC Eğrisi Çizimi
+def plot_roc_curve(true_labels, probs):
+    # ROC Eğrisi sadece binary classification için gösterilebilir.
+    fpr, tpr, _ = roc_curve(true_labels, probs[:, 1], pos_label=1)
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='blue', label=f'ROC Curve (AUC = {roc_auc:.2f})')
+    plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend()
+    plt.show()
+
+# Confusion Matrix Çizimi
+def plot_confusion_matrix(conf_matrix, class_names):
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.title('Confusion Matrix')
+    plt.show()
+
+# Loss Grafiği
+def plot_loss(train_loss_list, val_loss_list):
+    plt.figure(figsize=(8, 6))
+    plt.plot(train_loss_list, label='Training Loss', marker='o')
+    plt.plot(val_loss_list, label='Validation Loss', marker='o')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Epoch vs Loss')
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# Inference Süresi
+def measure_inference_time(example_text):
+    encoded_input = tokenizer.encode_plus(
+        example_text,
+        max_length=MAX_LEN,
+        add_special_tokens=True,
+        truncation=True,
+        padding='max_length',
+        return_tensors="pt"
+    )
+
+    input_ids = encoded_input['input_ids'].to(device)
+    attention_mask = encoded_input['attention_mask'].to(device)
+
+    start_time = time.time()
+    with torch.no_grad():
+        outputs = model(input_ids, attention_mask=attention_mask)
+    end_time = time.time()
+
+    return end_time - start_time
+
+# Sonuçları Yazdır
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+print(f"AUC: {roc_auc:.4f}")
+
+# Görselleştirmeleri Çiz
+class_names = label_encoder.classes_  # Orijinal etiket isimleri
+plot_confusion_matrix(conf_matrix, class_names)
+
+# ROC eğrisi çiz (eğer binary class ise)
+if len(class_names) == 2:
+    plot_roc_curve(true_labels, probs)
+
+# Örnek epoch-loss değerleri (eğitim sırasında kaydedilmeli)
+train_loss_list = [0.4074,0.1882, 0.1253, 0.0908, 0.0716]
+val_loss_list = [0.2375, 0.2195, 0.2291, 0.2495, 0.2425]
+plot_loss(train_loss_list, val_loss_list)
+
+# Inference Zamanı
+example_text = test_df['Content'].iloc[0]
+inference_time = measure_inference_time(example_text)
+print(f"Inference Time: {inference_time:.4f} seconds")
+
+import torch
+from sklearn.metrics import roc_curve, auc
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Modeli değerlendirme moduna al
+model.eval()
+
+all_preds = []
+all_labels = []
+all_probs = []
+
+with torch.no_grad():
+    for batch_idx, batch in enumerate(val_loader):  # Doğrulama seti
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['label'].to(device)
+
+        # Modelin tahminini al
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        logits = outputs.logits
+        probs = torch.nn.functional.softmax(logits, dim=-1)  # Olasılıkları al
+        preds = torch.argmax(probs, dim=1)
+
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_probs.extend(probs.cpu().numpy())
+
+# ROC Eğrisini Hesaplama
+fpr, tpr, _ = roc_curve(all_labels, np.array(all_probs)[:, 1], pos_label=1)  # binary class için
+roc_auc = auc(fpr, tpr)
+
+# ROC Eğrisini Çizme
+plt.figure()
+plt.plot(fpr, tpr, color='blue', label=f'ROC Curve (AUC = {roc_auc:.2f})')
+plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve')
+plt.legend(loc="lower right")
+plt.show()
+
+from transformers import BertTokenizer, BertForSequenceClassification
+from sklearn.metrics import confusion_matrix, classification_report
+import numpy as np
+
+# Kaydedilen model ve tokenizer'ı yükleme
+output_dir = "/content/drive/MyDrive/datas/bert_model"
+model = BertForSequenceClassification.from_pretrained(output_dir)
+tokenizer = BertTokenizer.from_pretrained(output_dir)
+model.to(device)
+
+# Tahmin yapma fonksiyonu
+def predict_model(test_loader):
+    model.eval()
+    all_labels = []
+    all_preds = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            preds = torch.argmax(logits, dim=1)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+
+    return np.array(all_labels), np.array(all_preds)
+
+# Test veri kümesi üzerinde tahmin yapma
+true_labels, predictions = predict_model(val_loader)
+
+# Confusion Matrix ve metrikleri hesaplama
+conf_matrix = confusion_matrix(true_labels, predictions)
+print("Confusion Matrix:")
+print(conf_matrix)
+
+# Sensitivity ve Specificity hesaplama
+def calculate_sensitivity_specificity(conf_matrix):
+    # Çok sınıflı durumda her sınıf için duyarlılık ve özgüllüğü hesapla
+    num_classes = conf_matrix.shape[0]
+    sensitivities = []
+    specificities = []
+
+    for i in range(num_classes):
+        # True Positive (TP), False Positive (FP), True Negative (TN), False Negative (FN)
+        TP = conf_matrix[i, i]
+        FN = np.sum(conf_matrix[i, :]) - TP
+        FP = np.sum(conf_matrix[:, i]) - TP
+        TN = np.sum(conf_matrix) - (TP + FN + FP)
+
+        sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0
+        specificity = TN / (TN + FP) if (TN + FP) > 0 else 0
+
+        sensitivities.append(sensitivity)
+        specificities.append(specificity)
+
+    return sensitivities, specificities
+
+sensitivities, specificities = calculate_sensitivity_specificity(conf_matrix)
+
+# Sonuçları yazdırma
+for i, (sens, spec) in enumerate(zip(sensitivities, specificities)):
+    print(f"Class {i}: Sensitivity = {sens:.4f}, Specificity = {spec:.4f}")
+
+# Genel bir rapor (Accuracy, Precision, Recall, F1-Score)
+print("\nClassification Report:")
+print(classification_report(true_labels, predictions, target_names=label_encoder.classes_))
+
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, auc, confusion_matrix
+import numpy as np
+import torch
+
+# Sensitivity ve Specificity hesaplama (Genel)
+def calculate_overall_sensitivity_specificity(conf_matrix):
+    # True Positive (TP), False Positive (FP), True Negative (TN), False Negative (FN)
+    TP = np.trace(conf_matrix)  # Doğru tahmin edilen örneklerin toplamı
+    FN = np.sum(conf_matrix, axis=1) - np.diag(conf_matrix)  # Her sınıf için yanlış negatiflerin toplamı
+    FP = np.sum(conf_matrix, axis=0) - np.diag(conf_matrix)  # Her sınıf için yanlış pozitiflerin toplamı
+    TN = np.sum(conf_matrix) - (TP + FN.sum() + FP.sum())  # Doğru negatiflerin toplamı
+
+    # Sensitivity ve Specificity hesaplama
+    sensitivity = TP / (TP + FN.sum()) if (TP + FN.sum()) > 0 else 0
+    specificity = TN / (TN + FP.sum()) if (TN + FP.sum()) > 0 else 0
+
+    return sensitivity, specificity
+
+# Test veri kümesi üzerinde tahmin yapma
+def predict_model(test_loader):
+    model.eval()
+    all_labels = []
+    all_probs = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask)
+            probs = torch.softmax(outputs.logits, dim=1)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+
+    return np.array(all_labels), np.array(all_probs)
+
+# ROC Eğrisi Çizme (Her Sınıf için)
+def plot_roc_curve(true_labels, probabilities, num_classes):
+    plt.figure(figsize=(10, 8))
+
+    for i in range(num_classes):
+        # Her sınıf için gerçek etiketler (binary) ve tahmin olasılıkları
+        true_binary = (true_labels == i).astype(int)
+        prob_class = probabilities[:, i]
+
+        # ROC ve AUC hesaplama
+        fpr, tpr, _ = roc_curve(true_binary, prob_class)
+        roc_auc = auc(fpr, tpr)
+
+        # ROC eğrisi çizme
+        plt.plot(fpr, tpr, label=f"Class {i} (AUC = {roc_auc:.2f})")
+
+    # Grafiği düzenleme
+    plt.plot([0, 1], [0, 1], 'k--', lw=2, label="Random Guessing")
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate (1 - Specificity)")
+    plt.ylabel("True Positive Rate (Sensitivity)")
+    plt.title("ROC Curve for All Classes")
+    plt.legend(loc="lower right")
+    plt.grid(alpha=0.3)
+    plt.show()
+
+# Tahmin yapma
+true_labels, probabilities = predict_model(val_loader)
+
+# Confusion Matrix Hesaplama
+predictions = np.argmax(probabilities, axis=1)
+conf_matrix = confusion_matrix(true_labels, predictions)
+
+# Genel Sensitivity ve Specificity Hesaplama
+overall_sensitivity, overall_specificity = calculate_overall_sensitivity_specificity(conf_matrix)
+
+# Sonuçları Yazdırma
+print(f"Overall Sensitivity (Recall): {overall_sensitivity:.4f}")
+print(f"Overall Specificity: {overall_specificity:.4f}")
+
+# ROC eğrisi çizimi
+num_classes = probabilities.shape[1]
+plot_roc_curve(true_labels, probabilities, num_classes)
+
+distilBERT 
+
+# Gerekli kütüphaneleri yükleme
+import pandas as pd
+import torch
+import time
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader, Dataset
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+from transformers import AdamW
+from torch.nn import CrossEntropyLoss
+
+# Cihaz kontrolü (GPU varsa kullan)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 1. Veri Yükleme
+train_df = pd.read_csv("/content/drive/MyDrive/datas/train_data.csv")
+test_df = pd.read_csv("/content/drive/MyDrive/datas/test_data.csv")
+# 2. Veri Ön İşleme
+label_encoder = LabelEncoder()
+train_df['Category'] = label_encoder.fit_transform(train_df['Category'])
+test_df['Category'] = label_encoder.transform(test_df['Category'])
+
+# 3. Tokenizer Tanımlama
+tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+
+# 4. Dataset Sınıfı Tanımlama
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+
+        encoding = self.tokenizer.encode_plus(
+            text,
+            max_length=self.max_len,
+            add_special_tokens=True,
+            truncation=True,
+            padding='max_length',
+            return_tensors="pt"
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'label': torch.tensor(label, dtype=torch.long)
+        }
+
+# 5. Dataset ve DataLoader Hazırlama
+MAX_LEN = 64
+BATCH_SIZE = 16
+
+train_dataset = TextDataset(
+    train_df['Content'].values,
+    train_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+test_dataset = TextDataset(
+    test_df['Content'].values,
+    test_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+# 6. Model Tanımlama (DistilBERT)
+model = DistilBertForSequenceClassification.from_pretrained("distilbert-base-uncased", num_labels=len(train_df['Category'].unique()))
+model.to(device)
+
+# 7. Optimizasyon ve Loss Fonksiyonu
+optimizer = AdamW(model.parameters(), lr=2e-5)
+criterion = CrossEntropyLoss()
+
+#8. Eğitim ve Doğrulama Döngüsü
+EPOCHS = 5
+
+def train_model():
+    model.train()
+    total_loss = 0
+
+    for batch_idx, batch in enumerate(train_loader):
+        optimizer.zero_grad()
+
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['label'].to(device)
+
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        # Her batch sonrası ilerlemeyi yazdır
+        #if (batch_idx + 1) % 250 == 0:
+            #print(f"Batch {batch_idx + 1}/{len(train_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(train_loader)
+
+def validate_model():
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(val_loader):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+
+            total_loss += loss.item()
+
+            # Her batch sonrası ilerlemeyi yazdır
+            #if (batch_idx + 1) % 250 == 0:
+                #print(f"Validation Batch {batch_idx + 1}/{len(val_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(val_loader)
+
+# Eğitim ve Doğrulama Zamanını Hesaplama
+start_time = time.time()
+
+for epoch in range(EPOCHS):
+    print(f"Epoch {epoch + 1}/{EPOCHS}")
+    train_loss = train_model()
+    val_loss = validate_model()
+    print(f"Epoch {epoch + 1}/{EPOCHS}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
+end_time = time.time()
+training_time = end_time - start_time
+
+print(f"Training Time: {training_time:.2f} seconds")
+
+# Modeli kaydetme
+model_save_path = "/content/drive/MyDrive/datas/distilbert_model.pth"
+torch.save(model.state_dict(), model_save_path)
+
+# Tokenizer'ı kaydetme
+tokenizer_save_path = "/content/drive/MyDrive/datas/distilbert_tokenizer"
+tokenizer.save_pretrained(tokenizer_save_path)
+
+print("Model ve tokenizer başarıyla kaydedildi.")
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_curve, auc
+import seaborn as sns
+import time
+import torch
+
+# Eğitim ve doğrulama kayıplarını sabitleme
+training_losses = [0.4292, 0.2001, 0.1347, 0.0939, 0.0748]
+validation_losses = [0.2624, 0.2311, 0.2455, 0.2674, 0.2530]
+
+# Başarım metriklerini hesaplamak
+def calculate_metrics(model, val_loader):
+    model.eval()
+
+    all_labels = []
+    all_preds = []
+    all_probs = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            # Modelin çıkışı
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+
+            # Tahmin ve gerçek etiketleri sakla
+            _, preds = torch.max(logits, dim=-1)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+
+    # Hesaplanan metrikler
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    # Sensitivity (Recall) and Specificity
+    cm = confusion_matrix(all_labels, all_preds)
+    sensitivity = cm[1, 1] / (cm[1, 0] + cm[1, 1])
+    specificity = cm[0, 0] / (cm[0, 0] + cm[0, 1])
+
+    # AUC
+    fpr, tpr, thresholds = roc_curve(all_labels, np.array(all_probs)[:, 1], pos_label=1)
+    auc_score = auc(fpr, tpr)
+
+    return accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr
+
+# Modelin başarım metriklerini hesaplama
+accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr = calculate_metrics(model, val_loader)
+
+# Sonuçları yazdırma
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+print(f"Sensitivity: {sensitivity:.4f}")
+print(f"Specificity: {specificity:.4f}")
+print(f"AUC: {auc_score:.4f}")
+
+# Karmaşıklık Matrisi
+def plot_confusion_matrix(cm, labels):
+    plt.figure(figsize=(6, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
+    plt.title("Confusion Matrix")
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.show()
+
+# Karmaşıklık matrisini çizme
+labels = label_encoder.classes_  # Kategorileri al
+plot_confusion_matrix(cm, labels)
+
+# ROC Eğrisini Çizme
+def plot_roc_curve(fpr, tpr, auc_score):
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='blue', label=f'ROC curve (AUC = {auc_score:.4f})')
+    plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+    plt.title("Receiver Operating Characteristic (ROC) Curve")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend(loc="lower right")
+    plt.show()
+
+# ROC Eğrisini çizme
+plot_roc_curve(fpr, tpr, auc_score)
+
+# Epoch ve Loss Grafiği
+def plot_loss_graph(training_losses, validation_losses):
+    plt.figure(figsize=(8, 6))
+    plt.plot(training_losses, label="Training Loss")
+    plt.plot(validation_losses, label="Validation Loss")
+    plt.title("Epoch vs Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+# Eğitim ve doğrulama kayıplarını çizme
+plot_loss_graph(training_losses, validation_losses)
+
+# İnferans Süresi (Inference Time)
+def measure_inference_time(model, text, tokenizer):
+    start_time = time.time()
+    model.eval()
+
+    encoding = tokenizer.encode_plus(
+        text,
+        max_length=64,
+        add_special_tokens=True,
+        truncation=True,
+        padding='max_length',
+        return_tensors="pt"
+    )
+
+    input_ids = encoding['input_ids'].to(device)
+    attention_mask = encoding['attention_mask'].to(device)
+
+    with torch.no_grad():
+        model(input_ids, attention_mask=attention_mask)
+
+    end_time = time.time()
+    inference_time = end_time - start_time
+    return inference_time
+
+# Örnek bir metin üzerinde inferans süresi ölçme
+text_example = "This is a test text for inference time."
+inference_time = measure_inference_time(model, text_example, tokenizer)
+print(f"Inference Time: {inference_time:.4f} seconds")
+
+
+ROBERTA 
+
+# Gerekli kütüphaneleri yükleme
+import pandas as pd
+import torch
+import time
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader, Dataset
+from transformers import RobertaTokenizer, RobertaForSequenceClassification
+from transformers import AdamW
+from torch.nn import CrossEntropyLoss
+
+# Cihaz kontrolü (GPU varsa kullan)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 1. Veri Yükleme
+train_df = pd.read_csv("/content/drive/MyDrive/datas/train_data.csv")
+test_df = pd.read_csv("/content/drive/MyDrive/datas/test_data.csv")
+
+# 2. Veri Ön İşleme
+label_encoder = LabelEncoder()
+train_df['Category'] = label_encoder.fit_transform(train_df['Category'])
+test_df['Category'] = label_encoder.transform(test_df['Category'])
+
+# 3. Tokenizer Tanımlama
+tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+
+# 4. Dataset Sınıfı Tanımlama
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+
+        encoding = self.tokenizer.encode_plus(
+            text,
+            max_length=self.max_len,
+            add_special_tokens=True,
+            truncation=True,
+            padding='max_length',
+            return_tensors="pt"
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'label': torch.tensor(label, dtype=torch.long)
+        }
+
+# 5. Dataset ve DataLoader Hazırlama
+MAX_LEN = 64
+BATCH_SIZE = 16
+
+train_dataset = TextDataset(
+    train_df['Content'].values,
+    train_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+test_dataset = TextDataset(
+    test_df['Content'].values,
+    test_df['Category'].values,
+    tokenizer,
+    MAX_LEN
+)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+# 6. Model Tanımlama (RoBERTa)
+model = RobertaForSequenceClassification.from_pretrained("roberta-base", num_labels=len(train_df['Category'].unique()))
+model.to(device)
+
+# 7. Optimizasyon ve Loss Fonksiyonu
+optimizer = AdamW(model.parameters(), lr=2e-5)
+criterion = CrossEntropyLoss()
+
+EPOCHS = 5
+
+def train_model():
+    model.train()
+    total_loss = 0
+
+    for batch_idx, batch in enumerate(train_loader):
+        optimizer.zero_grad()
+
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['label'].to(device)
+
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        # Her batch sonrası ilerlemeyi yazdır
+        #if (batch_idx + 1) % 10 == 0:
+            #print(f"Batch {batch_idx + 1}/{len(train_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(train_loader)
+
+def validate_model():
+    model.eval()
+    total_loss = 0
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(val_loader):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+
+            total_loss += loss.item()
+
+            # Her batch sonrası ilerlemeyi yazdır
+            #if (batch_idx + 1) % 10 == 0:
+                #print(f"Validation Batch {batch_idx + 1}/{len(val_loader)} - Loss: {loss.item():.4f}")
+
+    return total_loss / len(val_loader)
+
+# Eğitim ve Doğrulama Zamanını Hesaplama
+start_time = time.time()
+
+for epoch in range(EPOCHS):
+    print(f"Epoch {epoch + 1}/{EPOCHS}")
+    train_loss = train_model()
+    val_loss = validate_model()
+    print(f"Epoch {epoch + 1}/{EPOCHS}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
+end_time = time.time()
+training_time = end_time - start_time
+
+print(f"Training Time: {training_time:.2f} seconds")
+
+# Modeli Kaydetme
+model_save_path = "/content/drive/MyDrive/datas/roberta_model.pth"
+torch.save(model.state_dict(), model_save_path)
+print(f"Model başarıyla kaydedildi: {model_save_path}")
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_curve, auc
+import seaborn as sns
+import time
+import torch
+
+# Model ve tokenizer zaten yüklendiği varsayılıyor. Burada sadece bunları kullanıyoruz.
+# model ve tokenizer nesnelerinin yüklü olduğunu varsayalım
+
+# Eğitim ve doğrulama kayıplarını sabitleme
+training_losses = [0.3919, 0.2189, 0.1611, 0.1248, 0.1024]  # Roberta ile elde ettiğiniz eğitim kayıpları
+validation_losses = [0.2405, 0.2361, 0.2308, 0.2343, 0.2238]  # Roberta ile elde ettiğiniz doğrulama kayıpları
+
+
+# Başarım metriklerini hesaplamak
+def calculate_metrics(model, val_loader):
+    model.eval()
+
+    all_labels = []
+    all_preds = []
+    all_probs = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+
+            # Modelin çıkışı
+            outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+
+            # Tahmin ve gerçek etiketleri sakla
+            _, preds = torch.max(logits, dim=-1)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+
+    # Hesaplanan metrikler
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    # Sensitivity (Recall) and Specificity
+    cm = confusion_matrix(all_labels, all_preds)
+    sensitivity = cm[1, 1] / (cm[1, 0] + cm[1, 1])  # TP / (TP + FN)
+    specificity = cm[0, 0] / (cm[0, 0] + cm[0, 1])  # TN / (TN + FP)
+
+    # AUC
+    fpr, tpr, thresholds = roc_curve(all_labels, np.array(all_probs)[:, 1], pos_label=1)
+    auc_score = auc(fpr, tpr)
+
+    return accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr
+
+# Modelin başarım metriklerini hesaplama
+accuracy, precision, recall, f1, sensitivity, specificity, auc_score, cm, fpr, tpr = calculate_metrics(model, val_loader)
+
+# Sonuçları yazdırma
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+print(f"Sensitivity: {sensitivity:.4f}")
+print(f"Specificity: {specificity:.4f}")
+print(f"AUC: {auc_score:.4f}")
+
+# Karmaşıklık Matrisi
+def plot_confusion_matrix(cm, labels):
+    plt.figure(figsize=(6, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
+    plt.title("Confusion Matrix")
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.show()
+
+# Karmaşıklık matrisini çizme
+labels = tokenizer.convert_ids_to_tokens(list(range(model.config.num_labels)))  # RoBERTa sınıf etiketlerini almak
+plot_confusion_matrix(cm, labels)
+
+# ROC Eğrisini Çizme
+def plot_roc_curve(fpr, tpr, auc_score):
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='blue', label=f'ROC curve (AUC = {auc_score:.4f})')
+    plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+    plt.title("Receiver Operating Characteristic (ROC) Curve")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.legend(loc="lower right")
+    plt.show()
+
+# ROC Eğrisini çizme
+plot_roc_curve(fpr, tpr, auc_score)
+
+# Epoch ve Loss Grafiği
+def plot_loss_graph(training_losses, validation_losses):
+    plt.figure(figsize=(8, 6))
+    plt.plot(training_losses, label="Training Loss")
+    plt.plot(validation_losses, label="Validation Loss")
+    plt.title("Epoch vs Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+# Eğitim ve doğrulama kayıplarını çizme
+plot_loss_graph(training_losses, validation_losses)
+
+# İnferans Süresi (Inference Time)
+def measure_inference_time(model, text, tokenizer):
+    start_time = time.time()
+    model.eval()
+
+    encoding = tokenizer.encode_plus(
+        text,
+        max_length=64,
+        add_special_tokens=True,
+        truncation=True,
+        padding='max_length',
+        return_tensors="pt"
+    )
+
+    input_ids = encoding['input_ids'].to(device)
+    attention_mask = encoding['attention_mask'].to(device)
+
+    with torch.no_grad():
+        model(input_ids, attention_mask=attention_mask)
+
+    end_time = time.time()
+    inference_time = end_time - start_time
+    return inference_time
+
+# Örnek bir metin üzerinde inferans süresi ölçme
+text_example = "This is a test text for inference time."
+inference_time = measure_inference_time(model, text_example, tokenizer)
+print(f"Inference Time: {inference_time:.4f} seconds")
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+# Confusion matrix sample data
+confusion_matrix = np.array([[1036, 13, 27, 12, 12, 9],
+                              [29, 725, 21, 1, 4, 5],
+                              [31, 8, 828, 5, 4, 27],
+                              [8, 2, 10, 1282, 33, 5],
+                              [8, 1, 7, 19, 903, 3],
+                              [12, 8, 15, 6, 6, 960]])
+
+# Class labels
+labels = ['Biology', 'Chemistry', 'Physics', 'Regional', 'Religion', 'Technology']
+
+# Plot the confusion matrix
+plt.figure(figsize=(8, 6))
+sns.heatmap(confusion_matrix, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.show()
